@@ -59,7 +59,7 @@ pdf.chapter_body(text_flow)
 
 
 pdf.chapter_title('2. Core ML & Computer Vision Components')
-text_ml_note = "(Note: The prompt mentions advanced components like ArcFace, FAISS, and Liveness detection. The current codebase implements a simpler approach. Comparisons are provided below.)"
+text_ml_note = "(Note: The prompt mentions advanced components like ArcFace and FAISS. The current codebase implements a simpler approach. Comparisons are provided below.)"
 pdf.chapter_body(text_ml_note)
 
 pdf.sub_title('Feature Extraction & Embedding')
@@ -78,12 +78,7 @@ text_distance = (
 )
 pdf.chapter_body(text_distance)
 
-pdf.sub_title('Anti-Spoofing & Liveness')
-text_liveness = (
-    "- Implemented Logic: The current codebase does not implement active liveness detection.\n"
-    "- Future Recommendation: To prevent 2D presentation attacks (holding up a photo), mechanisms like EAR (Eye Aspect Ratio via landmarks) or texture analysis (LBP-SVM) should be integrated. Currently, a printed photo could trick the Haar + LBPH pipeline."
-)
-pdf.chapter_body(text_liveness)
+
 
 pdf.add_page()
 pdf.chapter_title('3. Backend & Database Architecture')

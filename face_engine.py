@@ -1,5 +1,6 @@
 import os
 import cv2
+cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
 import numpy as np
 import torch
 import torch.nn as nn

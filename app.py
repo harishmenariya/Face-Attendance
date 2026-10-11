@@ -3,7 +3,7 @@ import cv2
 import threading
 import time
 import csv
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, ttk
 from PIL import Image
 import numpy as np
 
@@ -35,7 +35,7 @@ class BiometricDashboard(ctk.CTk):
             "text_muted": "#94A3B8"
         }
         self.configure(fg_color=self.colors["bg_deep"])
-        
+         
         # Application State
         self.mode = "KIOSK"
         self.cap = None
@@ -207,8 +207,8 @@ class BiometricDashboard(ctk.CTk):
                             # Extract embedding
                             embedding = self.face_engine.extract_embedding(face_crop)
                             
-                            # Search in vector index
-                            uid, dist = self.vector_index.search(embedding, threshold=0.55)
+                            # Search in vector index (Updated threshold to 0.42)
+                            uid, dist = self.vector_index.search(embedding, threshold=0.42)
                             
                             if uid is not None:
                                 user_info = db.get_user_by_id(int(uid))
@@ -238,15 +238,34 @@ class BiometricDashboard(ctk.CTk):
             self.video_label.configure(image=ctk_img, text="")
             
             if verified_info:
-                # Mark attendance
-                success, timestamp = db.mark_attendance(verified_info[0], verified_info[1])
-                self.cam_badge.configure(text=f"✔ VERIFIED: {verified_info[1]}", text_color=self.colors["green"])
-                self.refresh_dashboard()
-                
-                # Auto-Off Mechanism
-                self.camera_running = False
-                self.after(1500, self.stop_camera)
-                return
+                import sqlite3
+                conn = sqlite3.connect(db.DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM attendance WHERE user_code = ? AND date = DATE('now', 'localtime')", (verified_info[0],))
+                already_marked = cursor.fetchone()
+                conn.close()
+
+                if already_marked:
+                    self.cam_badge.configure(text=f"⚠ ALREADY MARKED: {verified_info[1]}", text_color="#F59E0B")
+                    self.camera_running = False
+                    self.after(2000, self.stop_camera)
+                    return
+                else:
+                    # Mark attendance
+                    success, timestamp = db.mark_attendance(verified_info[0], verified_info[1])
+                    if success:
+                        self.cam_badge.configure(text=f"✔ VERIFIED: {verified_info[1]}", text_color=self.colors["green"])
+                        self.refresh_dashboard()
+                        
+                        # Auto-Off Mechanism
+                        self.camera_running = False
+                        self.after(2000, self.stop_camera)
+                        return
+                    else:
+                        self.cam_badge.configure(text=f"⚠ ALREADY MARKED: {verified_info[1]}", text_color="#F59E0B")
+                        self.camera_running = False
+                        self.after(2000, self.stop_camera)
+                        return
                 
         self.after(15, self.update_kiosk_camera)
         
@@ -317,9 +336,11 @@ class BiometricDashboard(ctk.CTk):
         
         self.admin_tabs.add("User Management & Enrollment")
         self.admin_tabs.add("Attendance Analytics & Export")
+        self.admin_tabs.add("Daily & Monthly Reports")
         
         self.setup_enrollment_tab()
         self.setup_analytics_tab()
+        self.setup_reports_tab()
         
     def setup_enrollment_tab(self):
         tab = self.admin_tabs.tab("User Management & Enrollment")
@@ -372,11 +393,11 @@ class BiometricDashboard(ctk.CTk):
         if not hasattr(self, 'users_textbox'): return
         self.users_textbox.configure(state="normal")
         self.users_textbox.delete("1.0", "end")
-        self.users_textbox.insert("end", f"{'UID':<6} | {'User Code':<15} | {'Full Name':<25} | {'Reg Date'}\n")
-        self.users_textbox.insert("end", "-"*70 + "\n")
+        self.users_textbox.insert("end", f"{'S.No':<5} | {'UID':<6} | {'User Code':<15} | {'Full Name':<25} | {'Reg Date'}\n")
+        self.users_textbox.insert("end", "-"*80 + "\n")
         users = db.get_all_users()
-        for u in users:
-            self.users_textbox.insert("end", f"{u[0]:<6} | {u[1]:<15} | {u[2]:<25} | {u[3]}\n")
+        for i, u in enumerate(users, start=1):
+            self.users_textbox.insert("end", f"{i:<5} | {u[0]:<6} | {u[1]:<15} | {u[2]:<25} | {u[3]}\n")
         self.users_textbox.configure(state="disabled")
         
     def open_edit_user_dialog(self):
@@ -407,8 +428,16 @@ class BiometricDashboard(ctk.CTk):
         name_entry.insert(0, user[1])
         name_entry.pack(pady=10)
         
+        # Fetch reg_date from DB
+        user_full = next((u for u in db.get_all_users() if u[0] == uid), None)
+        reg_date = user_full[3] if user_full else ""
+        
+        date_entry = ctk.CTkEntry(dialog, placeholder_text="Registration Date", width=200)
+        date_entry.insert(0, reg_date)
+        date_entry.pack(pady=10)
+        
         def save_changes():
-            success, msg = db.update_user(uid, code_entry.get().strip(), name_entry.get().strip())
+            success, msg = db.update_user(uid, code_entry.get().strip(), name_entry.get().strip(), date_entry.get().strip())
             if success:
                 messagebox.showinfo("Success", "User updated successfully", parent=dialog)
                 dialog.destroy()
@@ -526,14 +555,18 @@ class BiometricDashboard(ctk.CTk):
         self.enroll_btn.configure(state="normal")
         
         # Calculate mean embedding
-        mean_emb = np.mean(self.enrollment_crops, axis=0)
+        mean_emb = np.mean(self.enrollment_crops, axis=0).astype(np.float32)
         # Re-normalize
-        mean_emb = mean_emb / np.linalg.norm(mean_emb)
-        mean_emb = mean_emb.astype(np.float32)
+        norm = np.linalg.norm(mean_emb)
+        if norm > 0:
+            mean_emb = mean_emb / norm
         
         # Check for duplicate face before adding
         try:
-            uid, dist = self.vector_index.search(mean_emb, threshold=0.55)
+            uid, dist = self.vector_index.search(mean_emb, threshold=0.15)
+            if dist is not None:
+                print(f"[Enrollment Check] Closest existing vector distance: {dist:.4f} (Threshold: 0.15)")
+            
             if uid is not None:
                 # Duplicate found! Rollback the DB entry
                 db.delete_user(self.enrollment_user_id) 
@@ -610,6 +643,147 @@ class BiometricDashboard(ctk.CTk):
                 for s in summary:
                     w.writerow([s['user_code'], s['name'], s['total_days'], s['present'], s['absent'], s['percentage']])
             messagebox.showinfo("Success", f"Exported to {path}")
+
+    def setup_reports_tab(self):
+        tab = self.admin_tabs.tab("Daily & Monthly Reports")
+        
+        # Controls Frame
+        ctrl_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        ctrl_frame.pack(fill="x", pady=(0, 10))
+        
+        # View Mode Switch
+        self.report_mode = ctk.StringVar(value="Daily")
+        
+        ctk.CTkRadioButton(ctrl_frame, text="Daily Report", variable=self.report_mode, value="Daily", 
+                           command=self.refresh_reports_table).pack(side="left", padx=10)
+        ctk.CTkRadioButton(ctrl_frame, text="Monthly Report", variable=self.report_mode, value="Monthly", 
+                           command=self.refresh_reports_table).pack(side="left", padx=10)
+        
+        # Date Input
+        ctk.CTkLabel(ctrl_frame, text="Date (YYYY-MM-DD):").pack(side="left", padx=(20, 5))
+        self.report_date_entry = ctk.CTkEntry(ctrl_frame, width=120)
+        self.report_date_entry.insert(0, time.strftime("%Y-%m-%d"))
+        self.report_date_entry.pack(side="left", padx=5)
+        
+        # Month Input
+        ctk.CTkLabel(ctrl_frame, text="Month (YYYY-MM):").pack(side="left", padx=(20, 5))
+        self.report_month_entry = ctk.CTkEntry(ctrl_frame, width=100)
+        self.report_month_entry.insert(0, time.strftime("%Y-%m"))
+        self.report_month_entry.pack(side="left", padx=5)
+        
+        ctk.CTkButton(ctrl_frame, text="Apply Filter", command=self.refresh_reports_table, fg_color=self.colors["blue"]).pack(side="left", padx=10)
+        
+        # Export Button
+        ctk.CTkButton(ctrl_frame, text="Export CSV", command=self.export_reports_csv, fg_color=self.colors["green"]).pack(side="right", padx=10)
+        
+        # Treeview for Table
+        table_frame = ctk.CTkFrame(tab)
+        table_frame.pack(fill="both", expand=True, pady=10)
+        
+        # Treeview style
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Treeview", 
+                        background=self.colors["surface"],
+                        foreground="white",
+                        fieldbackground=self.colors["surface"],
+                        borderwidth=0,
+                        rowheight=25)
+        style.map('Treeview', background=[('selected', self.colors["blue"])])
+        style.configure("Treeview.Heading", background=self.colors["bg_deep"], foreground="white", borderwidth=1)
+        
+        self.report_tree = ttk.Treeview(table_frame, show="headings")
+        self.report_tree.pack(side="left", fill="both", expand=True)
+        
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.report_tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.report_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.report_data = [] # Store data for export
+        self.refresh_reports_table()
+        
+    def refresh_reports_table(self):
+        if not hasattr(self, 'report_tree'): return
+        
+        # Clear existing
+        for item in self.report_tree.get_children():
+            self.report_tree.delete(item)
+            
+        mode = self.report_mode.get()
+        if mode == "Daily":
+            self.report_tree["columns"] = ("code", "name", "date", "time", "status")
+            self.report_tree.heading("code", text="User Code")
+            self.report_tree.heading("name", text="Name")
+            self.report_tree.heading("date", text="Date")
+            self.report_tree.heading("time", text="Punch Time")
+            self.report_tree.heading("status", text="Status")
+            
+            self.report_tree.column("code", width=100)
+            self.report_tree.column("name", width=200)
+            self.report_tree.column("date", width=100)
+            self.report_tree.column("time", width=100)
+            self.report_tree.column("status", width=100)
+            
+            date_str = self.report_date_entry.get().strip()
+            if not date_str: date_str = time.strftime("%Y-%m-%d")
+            
+            report = db.get_daily_report(date_str)
+            self.report_data = report.get("records", [])
+            
+            for r in self.report_data:
+                self.report_tree.insert("", "end", values=(r["user_code"], r["name"], r["date"], r["punch_time"], r["status"]))
+                
+        else: # Monthly
+            self.report_tree["columns"] = ("code", "name", "total", "present", "absent", "rate")
+            self.report_tree.heading("code", text="User Code")
+            self.report_tree.heading("name", text="Name")
+            self.report_tree.heading("total", text="Total Days")
+            self.report_tree.heading("present", text="Present")
+            self.report_tree.heading("absent", text="Absent")
+            self.report_tree.heading("rate", text="Attendance %")
+            
+            self.report_tree.column("code", width=100)
+            self.report_tree.column("name", width=200)
+            self.report_tree.column("total", width=80)
+            self.report_tree.column("present", width=80)
+            self.report_tree.column("absent", width=80)
+            self.report_tree.column("rate", width=100)
+            
+            month_str = self.report_month_entry.get().strip()
+            if not month_str: month_str = time.strftime("%Y-%m")
+            
+            report = db.get_monthly_report(month_str)
+            self.report_data = report.get("records", [])
+            
+            for r in self.report_data:
+                self.report_tree.insert("", "end", values=(r["user_code"], r["name"], r["total_days"], r["days_present"], r["days_absent"], f"{r['attendance_percentage']}%"))
+                
+    def export_reports_csv(self):
+        if not hasattr(self, 'report_data') or not self.report_data:
+            messagebox.showinfo("Info", "No data to export.")
+            return
+            
+        mode = self.report_mode.get()
+        if mode == "Daily":
+            date_str = self.report_date_entry.get().strip() or time.strftime("%Y-%m-%d")
+            path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=f"Daily_Report_{date_str}.csv")
+            if path:
+                with open(path, 'w', newline='') as f:
+                    w = csv.writer(f)
+                    w.writerow(["User Code", "Name", "Date", "Punch Time", "Status"])
+                    for r in self.report_data:
+                        w.writerow([r["user_code"], r["name"], r["date"], r["punch_time"], r["status"]])
+                messagebox.showinfo("Success", f"Exported to {path}")
+        else:
+            month_str = self.report_month_entry.get().strip() or time.strftime("%Y-%m")
+            path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=f"Monthly_Report_{month_str}.csv")
+            if path:
+                with open(path, 'w', newline='') as f:
+                    w = csv.writer(f)
+                    w.writerow(["User Code", "Name", "Total Days", "Present", "Absent", "Attendance %"])
+                    for r in self.report_data:
+                        w.writerow([r["user_code"], r["name"], r["total_days"], r["days_present"], r["days_absent"], f"{r['attendance_percentage']}%"])
+                messagebox.showinfo("Success", f"Exported to {path}")
 
 if __name__ == "__main__":
     app = BiometricDashboard()

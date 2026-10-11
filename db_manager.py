@@ -124,7 +124,7 @@ def delete_user(numeric_id: int):
 def get_all_users() -> list:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, user_code, name, registered_date FROM users ORDER BY id DESC")
+    cursor.execute("SELECT id, user_code, name, registered_date FROM users ORDER BY id ASC")
     results = cursor.fetchall()
     conn.close()
     return results
@@ -214,6 +214,142 @@ def get_user_attendance_summary() -> list:
         
     conn.close()
     return summary
+
+def get_daily_report(date_str=None) -> dict:
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT u.id, u.user_code, u.name, a.time 
+        FROM users u
+        LEFT JOIN attendance a ON u.user_code = a.user_code AND a.date = ?
+        ORDER BY u.id ASC
+    """, (date_str,))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    records = []
+    present_count = 0
+    for r in rows:
+        is_present = r[3] is not None
+        if is_present:
+            present_count += 1
+        records.append({
+            "uid": r[0],
+            "user_code": r[1],
+            "name": r[2],
+            "date": date_str,
+            "punch_time": r[3] if is_present else "--",
+            "status": "Present" if is_present else "Absent"
+        })
+        
+    total_users = len(records)
+    rate = round((present_count / total_users * 100), 1) if total_users > 0 else 0.0
+    
+    return {
+        "date": date_str,
+        "total_users": total_users,
+        "present_count": present_count,
+        "absent_count": total_users - present_count,
+        "attendance_rate": rate,
+        "records": records
+    }
+
+def get_monthly_report(month_str=None) -> dict:
+    if not month_str:
+        month_str = datetime.now().strftime("%Y-%m")
+        
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT COUNT(DISTINCT date) 
+        FROM attendance 
+        WHERE strftime('%Y-%m', date) = ?
+    """, (month_str,))
+    total_days_conducted = cursor.fetchone()[0] or 1
+    
+    cursor.execute("""
+        SELECT u.id, u.user_code, u.name, 
+               COUNT(DISTINCT a.date) as days_present
+        FROM users u
+        LEFT JOIN attendance a ON u.user_code = a.user_code AND strftime('%Y-%m', a.date) = ?
+        GROUP BY u.id
+        ORDER BY u.id ASC
+    """, (month_str,))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    records = []
+    for r in rows:
+        p_days = r[3]
+        rate = round((p_days / total_days_conducted * 100), 1)
+        records.append({
+            "uid": r[0],
+            "user_code": r[1],
+            "name": r[2],
+            "month": month_str,
+            "days_present": p_days,
+            "days_absent": max(0, total_days_conducted - p_days),
+            "total_days": total_days_conducted,
+            "attendance_percentage": rate
+        })
+        
+    return {
+        "month": month_str,
+        "working_days": total_days_conducted,
+        "records": records
+    }
+
+def get_user_monthly_report(numeric_id: int, month_str=None) -> dict:
+    if not month_str:
+        month_str = datetime.now().strftime("%Y-%m")
+        
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Get user details
+    cursor.execute("SELECT id, user_code, name FROM users WHERE id = ?", (numeric_id,))
+    user = cursor.fetchone()
+    if not user:
+        conn.close()
+        return {"status": "error", "message": "User not found"}
+        
+    # Total unique active days conducted in this month
+    cursor.execute("SELECT COUNT(DISTINCT date) FROM attendance WHERE strftime('%Y-%m', date) = ?", (month_str,))
+    total_working = cursor.fetchone()[0] or 0
+    effective_days = max(1, total_working)
+    
+    # Day-by-day punches of this specific user in this month
+    cursor.execute("""
+        SELECT date, time 
+        FROM attendance 
+        WHERE user_code = ? AND strftime('%Y-%m', date) = ?
+        ORDER BY date ASC, time ASC
+    """, (user[1], month_str))
+    punches = cursor.fetchall()
+    conn.close()
+    
+    # We want unique days present
+    days_present = len(set([p[0] for p in punches]))
+    attendance_rate = round((days_present / effective_days * 100), 1) if total_working > 0 else 0.0
+    
+    return {
+        "status": "success",
+        "uid": user[0],
+        "user_code": user[1],
+        "name": user[2],
+        "month": month_str,
+        "total_working_days": total_working,
+        "days_present": days_present,
+        "days_absent": max(0, total_working - days_present),
+        "attendance_rate": attendance_rate,
+        "daily_breakdown": [{"date": p[0], "punch_time": p[1], "status": "Present"} for p in punches]
+    }
+
 
 if __name__ == '__main__':
     print("=== STEP 2: db_manager.py SELF-TEST ===")

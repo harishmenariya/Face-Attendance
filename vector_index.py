@@ -1,18 +1,24 @@
 import os
-import faiss
 import numpy as np
 
 class VectorIndex:
-    def __init__(self, index_path='models/face_index.faiss', dim=128):
+    def __init__(self, index_path='models/face_index.npz', dim=128):
+        # Update extension if old .faiss path is passed
+        if index_path.endswith('.faiss'):
+            index_path = index_path.replace('.faiss', '.npz')
         self.index_path = index_path
         self.dim = dim
+        self.embeddings = None
+        self.user_ids = None
         self._load_or_create_index()
 
     def _load_or_create_index(self):
         if os.path.exists(self.index_path):
             try:
-                self.index = faiss.read_index(self.index_path)
-                print(f"[VectorIndex] Loaded existing index from {self.index_path} with {self.index.ntotal} vectors.")
+                data = np.load(self.index_path)
+                self.embeddings = data['embeddings']
+                self.user_ids = data['user_ids']
+                print(f"[VectorIndex] Loaded existing index from {self.index_path} with {len(self.user_ids)} vectors.")
             except Exception as e:
                 print(f"[VectorIndex] Failed to load index: {e}. Creating a new one.")
                 self._create_new_index()
@@ -20,18 +26,25 @@ class VectorIndex:
             self._create_new_index()
 
     def _create_new_index(self):
-        # Create a new IndexIDMap2 wrapping an IndexFlatL2
-        # IndexIDMap2 is required to store integer IDs alongside vectors natively in FAISS
-        flat_index = faiss.IndexFlatL2(self.dim)
-        self.index = faiss.IndexIDMap2(flat_index)
-        print(f"[VectorIndex] Initialized fresh FAISS IndexIDMap2(IndexFlatL2({self.dim})).")
+        self.embeddings = np.empty((0, self.dim), dtype=np.float32)
+        self.user_ids = np.empty((0,), dtype=np.int64)
+        print(f"[VectorIndex] Initialized fresh NumPy Index ({self.dim}d).")
         self.save()
+
+    @property
+    def ntotal(self):
+        return len(self.user_ids)
+
+    def _normalize_L2(self, x):
+        norm = np.linalg.norm(x, axis=1, keepdims=True)
+        # Avoid division by zero
+        norm[norm == 0] = 1e-10
+        return x / norm
 
     def add_vector(self, user_id: int, embedding: np.ndarray):
         """
-        Normalizes and adds a 128-dimensional embedding to the FAISS index.
+        Normalizes and adds a 128-dimensional embedding to the index.
         """
-        # Ensure embedding is 2D array of shape (1, 128) and float32
         if embedding.ndim == 1:
             embedding = np.expand_dims(embedding, axis=0)
         
@@ -40,23 +53,28 @@ class VectorIndex:
         if embedding.shape[1] != self.dim:
             raise ValueError(f"Embedding dimension mismatch. Expected {self.dim}, got {embedding.shape[1]}")
             
-        # Normalize the embedding using L2 norm
-        faiss.normalize_L2(embedding)
+        embedding = self._normalize_L2(embedding)
         
-        # FAISS expects IDs as int64
         id_array = np.array([user_id], dtype=np.int64)
         
-        # Add to index
-        self.index.add_with_ids(embedding, id_array)
+        self.embeddings = np.vstack((self.embeddings, embedding))
+        self.user_ids = np.concatenate((self.user_ids, id_array))
+        
         self.save()
         return True
 
     def remove_vector(self, user_id: int):
         """Removes the vector associated with the given user_id from the index."""
-        if self.index.ntotal == 0:
+        if self.ntotal == 0:
             return False
-        selector = faiss.IDSelectorArray(np.array([user_id], dtype=np.int64))
-        self.index.remove_ids(selector)
+            
+        mask = self.user_ids != user_id
+        if np.all(mask):
+            return False
+            
+        self.embeddings = self.embeddings[mask]
+        self.user_ids = self.user_ids[mask]
+        
         self.save()
         return True
 
@@ -65,39 +83,38 @@ class VectorIndex:
         Searches the index for the closest vector to query_emb.
         Returns (matched_user_id, distance) if successful, else (None, distance).
         """
-        if self.index.ntotal == 0:
+        if self.ntotal == 0:
             return None, float('inf')
             
-        # Ensure query is 2D array and float32
         if query_emb.ndim == 1:
             query_emb = np.expand_dims(query_emb, axis=0)
             
         query_emb = np.ascontiguousarray(query_emb, dtype=np.float32)
+        query_emb = self._normalize_L2(query_emb)
         
-        # Normalize the query embedding for cosine similarity equivalent using L2
-        faiss.normalize_L2(query_emb)
+        # Calculate L2 squared distances (matches faiss.IndexFlatL2 behavior)
+        diff = self.embeddings - query_emb
+        distances = np.sum(diff ** 2, axis=1)
         
-        # Search for top 1 closest vector
-        distances, indices = self.index.search(query_emb, k=1)
+        best_idx = np.argmin(distances)
+        best_dist = float(distances[best_idx])
+        best_id = int(self.user_ids[best_idx])
         
-        matched_user_id = int(indices[0][0])
-        distance = float(distances[0][0])
-        
-        if matched_user_id != -1 and distance <= threshold:
-            return matched_user_id, distance
+        if best_dist <= threshold:
+            return best_id, best_dist
             
-        return None, distance
+        return None, best_dist
 
     def save(self):
         """Saves the current index to disk."""
         os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
-        faiss.write_index(self.index, self.index_path)
+        np.savez(self.index_path, embeddings=self.embeddings, user_ids=self.user_ids)
 
 if __name__ == '__main__':
     print("=== STEP 3: vector_index.py SELF-TEST ===")
     
     # Use a dummy path for the self-test
-    test_index_path = 'models/test_face_index.faiss'
+    test_index_path = 'models/test_face_index.npz'
     vi = VectorIndex(index_path=test_index_path, dim=128)
     
     # 1. Create a mock embedding and add to index
@@ -107,7 +124,7 @@ if __name__ == '__main__':
     
     print(f"1. Adding mock vector for User ID {mock_id}...")
     vi.add_vector(mock_id, mock_emb)
-    print(f"   [OK] Vector added. Total vectors in index: {vi.index.ntotal}")
+    print(f"   [OK] Vector added. Total vectors in index: {vi.ntotal}")
     
     # 2. Perform a search query with the exact same embedding
     print(f"2. Querying the exact same vector...")
